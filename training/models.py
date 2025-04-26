@@ -1,5 +1,8 @@
+import os
 import torch
 import torch.nn as nn
+from datetime import datetime
+from torch.utils.tensorboard import SummaryWriter
 from transformers import BertModel
 from torchvision import models as vision_models
 from sklearn.metrics import precision_score, accuracy_score
@@ -7,7 +10,7 @@ from sklearn.metrics import precision_score, accuracy_score
 class TextEncoder(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.bert = BertModel.from_pretrained('bert-base-uncase')
+        self.bert = BertModel.from_pretrained('bert-base-uncased')
 
         # exclude pre-trained model params from training.
         # Training is much faster with fewer trainable nodes
@@ -60,7 +63,7 @@ class AudioEncoder(nn.Module):
             nn.Conv1d(64, 128, kernel_size=3),
             nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.AdaptiveAvgPool1d
+            nn.AdaptiveAvgPool1d(1)
         )
 
         for param in self.conv_layers.parameters():
@@ -82,8 +85,8 @@ class AudioEncoder(nn.Module):
     
 
 class MultiModalSentimentModel(nn.Module):
-    def __init__(self):
-        super.__init__()
+    def __init__(self) -> None:
+        super().__init__()
 
         # Encoders
         self.text_encoder = TextEncoder()
@@ -94,14 +97,14 @@ class MultiModalSentimentModel(nn.Module):
         self.fusion_layer = nn.Sequential(
             nn.Linear((128 * 3), 256),
             nn.BatchNorm1d(256),
-            nn.ReLu(),
+            nn.ReLU(),
             nn.Dropout(0.2)
         )
 
         # Classification heads(models)
         self.emotion_classifier = nn.Sequential(
             nn.Linear(256, 64),
-            nn.Relu(),
+            nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(64, 7) # sadness, anger, disgust,...
         )
@@ -154,6 +157,14 @@ class MultiModalTrainer:
         print(f"Validation dataset: {val_size}")
         print(f"Batches per epoch: {len(self.train_loader)}")
 
+        timsetamp = datetime.now().strftime('%b%d_%H-%M-%S')   # Sep4_12_13_45
+        base_dir = 'opt/ml/output/tensorboard' if 'SM_MODEL_DIR' in os.environ else 'runs'
+        log_dir = f"{base_dir}/run_{timsetamp}"
+        self.writer = SummaryWriter(log_dir=log_dir)
+        self.global_step = 0    # Tracks current epoch number
+
+        self.current_train_losses = None
+
         self.optimizer = torch.optim.Adam([
             {'params': model.text_encoder.parameters(), 'lr': 8e-6},
             {'params': model.audio_encoder.parameters(), 'lr': 8e-5},
@@ -177,6 +188,37 @@ class MultiModalTrainer:
         self.sentiment_criterion = nn.CrossEntropyLoss(
             label_smoothing=0.05
         )
+
+
+    def log_metrics(self, losses, metrics=None, mode='train'):
+        if mode == 'train':
+            self.current_train_losses = losses
+        else: # validation mode
+            self.writer.add_scalar(
+                'loss/total/train', self.current_train_losses['total'], self.global_step)
+            self.writer.add_scalar(
+                'loss/total/val', losses['total'], self.global_step)
+
+            self.writer.add_scalar(
+                'loss/emotion/train', self.current_train_losses['emotion'], self.global_step)
+            self.writer.add_scalar(
+                'loss/emotion/val', losses['emotion'], self.global_step)
+
+            self.writer.add_scalar(
+                'loss/sentiment/train', self.current_train_losses['sentiment'], self.global_step)
+            self.writer.add_scalar(
+                'loss/sentiment/val', losses['sentiment'], self.global_step)
+
+        if metrics:
+            self.writer.add_scalar(
+                f'{mode}/emotion_precision', metrics['emotion_precision'], self.global_step)
+            self.writer.add_scalar(
+                f'{mode}/emotion_accuracy', metrics['emotion_accuracy'], self.global_step)
+            self.writer.add_scalar(
+                f'{mode}/sentiment_precision', metrics['sentiment_precision'], self.global_step)
+            self.writer.add_scalar(
+                f'{mode}/sentiment_accuracy', metrics['sentiment_accuracy'], self.global_step)
+
 
     def train_epoch(self):
         self.model.train()
@@ -220,8 +262,14 @@ class MultiModalTrainer:
             running_loss['emotion'] += emotion_loss.item()
             running_loss['sentiment'] += sentiment_loss.item()
 
-        # return the average loss-values for the entire training dataset
-        return {k: v/len(self.train_loader) for k, v in running_loss.items()}
+            # average loss-values for the entire training dataset
+            avg_loss = {k: v/len(self.train_loader) for k, v in running_loss.items()}
+
+            self.log_metrics(avg_loss) # must be logged before increasing global_step
+
+            self.global_step += 1 
+
+        return avg_loss
     
     def evaluate(self, data_loader, mode='val'):
         # turn off training mode
@@ -279,6 +327,13 @@ class MultiModalTrainer:
                     all_sentiment_labels, all_sentiment_predictions, 'average=weighted')
                 sentiment_accuracy = accuracy_score(
                     all_sentiment_labels, all_sentiment_predictions)
+
+                self.log_metrics(losses=avg_loss,mode=mode, metrics={
+                    'emotion_precision': emotion_precision,
+                    'emotion_accuracy': emotion_accuracy,
+                    'sentiment_precision': sentiment_precision,
+                    'sentiment_accuracy': sentiment_accuracy
+                })
                 
                 # Adjust the models learning-rate in neccessary, 
                 # based on its performance on the validation dataset
