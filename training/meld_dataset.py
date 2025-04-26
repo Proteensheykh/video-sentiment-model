@@ -158,7 +158,7 @@ class MELDDataset(Dataset):
                 )
             
             # Get Audio
-            audio_features = _extract_audio_features(path)
+            audio_features = self._extract_audio_features(path)
 
             # Map sentiment and emottion labels
             sentiment_label = self.sentiment_map[row['Sentiment'].lower()]
