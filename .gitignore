@@ -132,6 +132,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# tensorboard run files
+runs
+
 # Spyder project settings
 .spyderproject
 .spyproject
