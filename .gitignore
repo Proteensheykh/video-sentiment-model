@@ -134,6 +134,7 @@ venv.bak/
 
 # tensorboard run files
 runs
+training/runs
 
 # Spyder project settings
 .spyderproject
