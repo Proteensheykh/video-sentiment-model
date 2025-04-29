@@ -141,6 +141,55 @@ def forward(self, text_inputs, video_frames, audio_features):
         'sentiments': sentiment_output
     }
 
+def compute_class_weights(dataset):
+    emotions_count = torch.zeros(7)
+    sentiments_count = torch.zeros(3)
+    skipped = 0
+    total = len(dataset)
+
+    print("Counting class distributions...")
+    for i in range(dataset):
+        sample = dataset[i]
+
+        if sample == None:
+            skipped += 1
+            continue
+
+        emotion_label = sample['emotion_label']
+        sentiment_label = sample['sentiment _label']
+
+        emotions_count[emotion_label] += 1
+        sentiments_count[sentiment_label] += 1
+
+    valid = total - skipped
+    print(f"\nskipped samles: {skipped}")
+
+    print("\nClass distribution")
+    print("Emotions:")
+
+    for i, count in enumerate(emotions_count):
+        emotions_map = {0: "anger", 1:"disgust", 2: "fear", 3: "joy", 
+                        4: "neutral", 5: "sadness", 6: "surprise"}
+        
+        print(f"{emotions_map[i]}: {count/valid:.2f}")
+
+    print("\nSentiments:")
+
+    for i, count in enumerate(sentiments_count):
+        sentiment_map = {0: "negative", 1: "neutral", 2: "positive"}
+        print(f"{sentiment_map[i]}: {count/valid:.2f}")
+
+    # Calculate class weights
+    emotion_weights = 1.0 / emotions_count
+    sentiment_weights = 1.0 / sentiments_count
+
+    # Normalize weights
+    emotion_weights = emotion_weights / emotion_weights.sum()
+    sentiment_weights = sentiment_weights / sentiment_weights.sum()
+
+    return emotion_weights, sentiment_weights
+
+
 
 class MultiModalTrainer:
 
@@ -165,6 +214,18 @@ class MultiModalTrainer:
 
         self.current_train_losses = None
 
+        # Calculate class weights
+        print("Calculating class weights...")
+        emotion_weights, sentiment_weights = compute_class_weights(self.train_loader.dataset)
+
+        device = next(model.parameters()).device
+        
+        self.emotion_weights = emotion_weights.to(device)
+        self.sentiment_weights = sentiment_weights.to(device)
+
+        print(f"\nEmotion weights on device: {self.emotion_weights.device}")
+        print(f"Sentiment weights on device: {self.sentiment_weights.device}")
+
         self.optimizer = torch.optim.Adam([
             {'params': model.text_encoder.parameters(), 'lr': 8e-6},
             {'params': model.audio_encoder.parameters(), 'lr': 8e-5},
@@ -182,11 +243,13 @@ class MultiModalTrainer:
         )
 
         self.emotion_criterion = nn.CrossEntropyLoss(
-            label_smoothing=0.05
+            label_smoothing=0.05,
+            weight=emotion_weights
         )
 
         self.sentiment_criterion = nn.CrossEntropyLoss(
-            label_smoothing=0.05
+            label_smoothing=0.05,
+            weight=sentiment_weights
         )
 
 

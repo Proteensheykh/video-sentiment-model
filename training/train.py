@@ -2,8 +2,8 @@ import json
 import argparse, os, sys
 import torch
 import torchaudio
-import tqdm
 
+from tqdm import tqdm
 from meld_dataset import prepare_dataloaders
 from models import MultiModalSentimentModel, MultiModalTrainer
 from install_ffmpeg import install_ffmpeg
