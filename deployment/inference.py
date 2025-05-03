@@ -1,8 +1,11 @@
 import torch
-import os, subprocess
+import os, subprocess, sys
 import cv2, torchaudio
 import numpy as np
 import whisper
+import boto3
+import json
+import tempfile
 
 from transformers import AutoTokenizer
 from models import MultiModalSentimentModel
@@ -10,6 +13,59 @@ from models import MultiModalSentimentModel
 
 EMOTION_MAP = {0: 'anger', 1: 'disgust', 2: 'fear', 3: 'joy', 4: 'neutral', 5: 'sadness', 6: 'surprise'}
 SENTIMENT_MAP = {0: 'negative', 1: 'neutral', 2: 'positive'}
+
+
+def install_ffmpeg():
+    print("Starting ffmpeg installation...")
+
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "setuptools"])
+
+    # install python library
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "ffmpeg-python"])
+        print("Installed ffmpeg-python completely")
+    except subprocess.CalledProcessError as e:
+        print("Failed to install ffmpeg-python")
+        print(e)
+
+    # download binary file
+    try:
+        subprocess.check_call([
+            "wget",
+            "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
+            "-O", "/tmp/ffmpeg.tar.xz"
+        ])
+
+        subprocess.check_call(["tar", "-xf", "/tmp/ffmpeg.tar.xz", "-C", "/tmp/"])
+
+        # Find the location path to ffmpeg file inside /temp/ directory
+        ffmpeg_path = subprocess.run(
+            ["find", "/tmp", "-name", "ffmpeg", "-type", "f"],
+            capture_output=True,
+            text=True
+        ).stdout.strip() # print to terminal
+
+        # make binary globally accessible
+        subprocess.check_call(["cp", ffmpeg_path, "/usr/local/bin/ffmpeg"])
+        
+        # Make binary executable
+        subprocess.check_call("chmod", "+x", "/usr/local/bin/ffmpeg")
+
+        print("Intalled static ffmpeg binary successfully")
+    except Exception as e:
+        print(f"Failed to install static ffmpeg binary: {e}")
+
+    # Verify installation
+    try:
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, check=True)
+        print("ffmpeg verion:")
+        print(result.stdout)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("ffmpeg installation verification failed.")
+        return False
+    
 
 class VideoProcessor:
     def process_videos(self, video_path: str):
@@ -137,8 +193,36 @@ class VideoUtteranceProcessor:
             raise ValueError("Segment extraction failed:", segment_path)
         
         return segment_path
+    
+def download_from_s3(s3_uri):
+    s3_client = boto3.client("s3")
+    bucket = s3_uri.split("/")[2]
+    key = "/".join(s3_uri.split("/")[3:])
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+        s3_client.download_file(bucket, key, temp_file.name)
+        return temp_file.name
+
+
+def input_fn(request_body, content_type):
+    if content_type == "application/json":
+        input_data = json.loads(request_body)
+        s3_uri = input_data['video_path']
+        local_path = download_from_s3(s3_uri)
+        return {"video_path": local_path}
+    raise ValueError(f"Unsupported content type: {content_type}")
+
+
+def output_fn(prediction, content_type):
+    if content_type == "application/json":
+        return json.dumps(prediction)
+    raise ValueError(f"Unsupported content type: {content_type}")
 
 def model_fn(model_dir):
+    # install ffmpeg
+    if not install_ffmpeg():
+        raise RuntimeError("Ffmpeg installation failed - required for inference")
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MultiModalSentimentModel().to(device)
 
